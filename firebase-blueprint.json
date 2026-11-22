@@ -1,0 +1,92 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Cloud-synced Maya AI user preferences and model/framework/instruction settings.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID of the owner." },
+        "displayName": { "type": "string", "description": "Display name." },
+        "email": { "type": "string", "description": "User email address." },
+        "activeProvider": { "type": "string", "description": "Active LLM provider identifier." },
+        "activeModel": { "type": "string", "description": "Active LLM model ID." },
+        "activeFramework": { "type": "string", "description": "Active development framework target." },
+        "activePersona": { "type": "string", "description": "Active assistant persona (Maya, Friday, Venom)." },
+        "customInstructions": { "type": "string", "description": "User custom system instructions." },
+        "customInstructionsEnabled": { "type": "boolean", "description": "Whether custom system instructions are active." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update." }
+      },
+      "required": [
+        "userId",
+        "displayName",
+        "activeProvider",
+        "activeModel",
+        "activeFramework",
+        "activePersona",
+        "customInstructionsEnabled",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "MemoryRecord": {
+      "title": "MemoryRecord",
+      "description": "Cloud-synced Yaadein long-term memory entry.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID of the owner." },
+        "category": { "type": "string", "description": "Memory category." },
+        "content": { "type": "string", "description": "Sanitized memory text (never credentials)." },
+        "importance": { "type": "integer", "description": "Importance score 1 to 5." },
+        "source": { "type": "string", "description": "Origin of memory (manual, auto, voice)." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update." }
+      },
+      "required": [
+        "userId",
+        "category",
+        "content",
+        "importance",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ChatBackupRecord": {
+      "title": "ChatBackupRecord",
+      "description": "Cloud-synced conversation message backup.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID of the owner." },
+        "sessionId": { "type": "string", "description": "Conversation session ID." },
+        "role": { "type": "string", "enum": ["user", "model", "tool"], "description": "Message sender role." },
+        "text": { "type": "string", "description": "Message body." },
+        "modelUsed": { "type": "string", "description": "Model ID that produced the reply." },
+        "providerUsed": { "type": "string", "description": "Provider name." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update." }
+      },
+      "required": [
+        "userId",
+        "sessionId",
+        "role",
+        "text",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Per-user Maya AI profile and synced configuration."
+    },
+    "/users/{userId}/memories/{memoryId}": {
+      "schema": { "$ref": "#/entities/MemoryRecord" },
+      "description": "Per-user Yaadein long-term memories."
+    },
+    "/users/{userId}/chats/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatBackupRecord" },
+      "description": "Per-user backed up chat messages."
+    }
+  }
+}

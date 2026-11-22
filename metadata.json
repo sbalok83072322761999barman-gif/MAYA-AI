@@ -1,0 +1,6 @@
+{
+  "name": "Maya AI",
+  "description": "Voice-first Android AI assistant with real-time audio engine, wake word detection, multi-provider LLM gateway, Yaadein long-term memory, Android automation, vision, and agentic tools.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

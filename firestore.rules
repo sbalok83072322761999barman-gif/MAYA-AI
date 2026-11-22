@@ -1,0 +1,124 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId.size() <= 128 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+             (!('email' in data) || (data.email is string && data.email.size() <= 200)) &&
+             data.activeProvider is string && data.activeProvider.size() >= 1 && data.activeProvider.size() <= 50 &&
+             data.activeModel is string && data.activeModel.size() >= 1 && data.activeModel.size() <= 120 &&
+             data.activeFramework is string && data.activeFramework.size() >= 1 && data.activeFramework.size() <= 60 &&
+             data.activePersona is string && data.activePersona.size() >= 1 && data.activePersona.size() <= 40 &&
+             (!('customInstructions' in data) || (data.customInstructions is string && data.customInstructions.size() <= 4000)) &&
+             data.customInstructionsEnabled is bool &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidMemoryRecord(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId.size() <= 128 &&
+             data.category is string && data.category.size() >= 1 && data.category.size() <= 50 &&
+             data.content is string && data.content.size() >= 1 && data.content.size() <= 4000 &&
+             data.importance is int && data.importance >= 1 && data.importance <= 5 &&
+             (!('source' in data) || (data.source is string && data.source.size() <= 60)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidChatBackupRecord(data, userId) {
+      return data.userId is string && data.userId == userId && data.userId.size() <= 128 &&
+             data.sessionId is string && data.sessionId.size() >= 1 && data.sessionId.size() <= 100 &&
+             data.role in ['user', 'model', 'tool'] &&
+             data.text is string && data.text.size() >= 1 && data.text.size() <= 12000 &&
+             (!('modelUsed' in data) || (data.modelUsed is string && data.modelUsed.size() <= 120)) &&
+             (!('providerUsed' in data) || (data.providerUsed is string && data.providerUsed.size() <= 60)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+
+      allow create: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       incoming().keys().hasAll(['userId', 'displayName', 'activeProvider', 'activeModel', 'activeFramework', 'activePersona', 'customInstructionsEnabled', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'displayName', 'email', 'activeProvider', 'activeModel', 'activeFramework', 'activePersona', 'customInstructions', 'customInstructionsEnabled', 'createdAt', 'updatedAt']) &&
+                       isValidUserProfile(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       isValidUserProfile(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'activeProvider', 'activeModel', 'activeFramework', 'activePersona', 'customInstructions', 'customInstructionsEnabled', 'updatedAt']);
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      match /memories/{memoryId} {
+        allow get: if isOwner(userId) && isValidId(memoryId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(memoryId) &&
+                         incoming().keys().hasAll(['userId', 'category', 'content', 'importance', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'category', 'content', 'importance', 'source', 'createdAt', 'updatedAt']) &&
+                         isValidMemoryRecord(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(memoryId) &&
+                         isValidMemoryRecord(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['category', 'content', 'importance', 'source', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(memoryId);
+      }
+
+      match /chats/{messageId} {
+        allow get: if isOwner(userId) && isValidId(messageId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(messageId) &&
+                         incoming().keys().hasAll(['userId', 'sessionId', 'role', 'text', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['userId', 'sessionId', 'role', 'text', 'modelUsed', 'providerUsed', 'createdAt', 'updatedAt']) &&
+                         isValidChatBackupRecord(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(messageId) &&
+                         isValidChatBackupRecord(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['text', 'modelUsed', 'providerUsed', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(messageId);
+      }
+    }
+  }
+}

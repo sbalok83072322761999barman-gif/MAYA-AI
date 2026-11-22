@@ -1,0 +1,14 @@
+<resources>
+    <string name="app_name">Maya AI</string>
+    <string name="accessibility_service_label">Maya AI Screen &amp; UI Driver</string>
+    <string name="accessibility_service_description">Allows Maya AI to read visible UI text and perform user-confirmed taps, scrolling, and form entry on screen.</string>
+    <string name="notification_listener_label">Maya AI Notification Intelligence</string>
+    <string name="qs_tile_label">Maya Mic</string>
+    <string name="live_wallpaper_label">Maya Neural Orb</string>
+    <string name="live_wallpaper_description">Lightweight animated acoustic neural orb optimized for 4 GB RAM devices.</string>
+    <string name="widget_label">Maya AI Quick Voice</string>
+    <string name="widget_tap_hint">Tap to open voice or chat</string>
+    <string name="widget_voice_btn">Speak</string>
+    <string name="error_network_unavailable">Network unavailable. Check connection or switch to local mode.</string>
+    <string name="error_auth_required">Sign in with Google to sync cloud data.</string>
+</resources>
