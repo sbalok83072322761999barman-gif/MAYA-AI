@@ -16,8 +16,15 @@ android {
     applicationId = "com.aistudio.mayaai.kx7vqm"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    val ciVersionCode =
+        (project.findProperty("VERSION_CODE") as String?)?.toIntOrNull()
+            ?: System.getenv("VERSION_CODE")?.toIntOrNull()
+    val ciVersionName =
+        (project.findProperty("VERSION_NAME") as String?)?.takeIf { it.isNotBlank() }
+            ?: System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() }
+
+    versionCode = ciVersionCode ?: 1
+    versionName = ciVersionName ?: "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

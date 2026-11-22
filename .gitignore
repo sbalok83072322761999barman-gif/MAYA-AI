@@ -18,3 +18,18 @@ local.properties
 debug.keystore
 *-debug.log
 
+# Signing keys, keystores, and credentials (never commit release keys)
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.b64
+!debug.keystore.base64
+signing.properties
+keystore.properties
+
+# Generated release/debug binaries & checksums
+*.apk
+*.aab
+*.sha256
