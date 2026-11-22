@@ -1,0 +1,399 @@
+name: Android Release & GitHub Release Automation
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: 'Optional semantic version name (e.g., 1.0.0). Leave blank to derive automatically.'
+        required: false
+        type: string
+      version_code:
+        description: 'Optional integer versionCode (e.g., 10000). Leave blank to derive automatically.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    name: Build, Sign & Publish Android Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK & accept licenses
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle & dependency cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare debug keystore & Gradle wrapper
+        run: |
+          chmod +x gradlew
+          if [ ! -f debug.keystore ] && [ -f debug.keystore.base64 ]; then
+            base64 --decode debug.keystore.base64 > debug.keystore
+          fi
+          if [ ! -f debug.keystore ]; then
+            echo "::error::debug.keystore is missing and debug.keystore.base64 could not be decoded."
+            exit 1
+          fi
+
+      - name: Resolve version name, version code & release tag
+        id: version
+        run: |
+          RAW_INPUT_NAME="${{ github.event.inputs.version_name }}"
+          RAW_INPUT_CODE="${{ github.event.inputs.version_code }}"
+          REF_NAME="${{ github.ref_name }}"
+          REF_TYPE="${{ github.ref_type }}"
+
+          if [ -n "$RAW_INPUT_NAME" ]; then
+            VERSION_NAME="${RAW_INPUT_NAME#v}"
+            RELEASE_TAG="v${VERSION_NAME}"
+          elif [ "$REF_TYPE" = "tag" ]; then
+            RELEASE_TAG="$REF_NAME"
+            VERSION_NAME="${REF_NAME#v}"
+          else
+            BASE_VER="1.0.0"
+            if ! git rev-parse -q --verify "refs/tags/v${BASE_VER}" >/dev/null 2>&1; then
+              VERSION_NAME="${BASE_VER}"
+            else
+              TAG_SHA=$(git rev-list -n 1 "v${BASE_VER}")
+              if [ "$TAG_SHA" = "${{ github.sha }}" ]; then
+                VERSION_NAME="${BASE_VER}"
+              else
+                VERSION_NAME="1.0.${{ github.run_number }}"
+              fi
+            fi
+            RELEASE_TAG="v${VERSION_NAME}"
+          fi
+
+          if [ -n "$RAW_INPUT_CODE" ]; then
+            if ! [[ "$RAW_INPUT_CODE" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::version_code must be a positive integer, got '$RAW_INPUT_CODE'."
+              exit 1
+            fi
+            VERSION_CODE="$RAW_INPUT_CODE"
+          elif [[ "$VERSION_NAME" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            MAJOR="${BASH_REMATCH[1]}"
+            MINOR="${BASH_REMATCH[2]}"
+            PATCH="${BASH_REMATCH[3]}"
+            VERSION_CODE=$(( MAJOR * 10000 + MINOR * 100 + PATCH ))
+            if [ "$VERSION_CODE" -lt 1 ]; then VERSION_CODE=1; fi
+          else
+            VERSION_CODE="${{ github.run_number }}"
+          fi
+
+          echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Resolved release version: ${VERSION_NAME} (versionCode=${VERSION_CODE}, tag=${RELEASE_TAG})"
+
+      - name: Check release signing secrets availability
+        id: secrets_check
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          MISSING=()
+          [ -z "${KEYSTORE_B64}" ] && MISSING+=("ANDROID_KEYSTORE_BASE64")
+          [ -z "${KEYSTORE_PASS}" ] && MISSING+=("ANDROID_KEYSTORE_PASSWORD")
+          [ -z "${KEY_ALIAS}" ] && MISSING+=("ANDROID_KEY_ALIAS")
+          [ -z "${KEY_PASS}" ] && MISSING+=("ANDROID_KEY_PASSWORD")
+
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            MISSING_LIST=$(IFS=", "; echo "${MISSING[*]}")
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "missing=${MISSING_LIST}" >> "$GITHUB_OUTPUT"
+            echo "::warning::Release signing secrets are not configured (${MISSING_LIST}). Will build Debug APK only and skip Release publication."
+
+            if [ "${{ github.ref_type }}" = "tag" ]; then
+              echo "::error::Tag push '${{ github.ref_name }}' requires signed Release APK, but missing secrets: ${MISSING_LIST}. Configure them under Settings -> Secrets and variables -> Actions."
+              exit 1
+            fi
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "All release signing secrets are present."
+          fi
+
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Build Debug APK (always verified)
+        run: |
+          ./gradlew clean assembleDebug \
+            -PVERSION_NAME="${{ steps.version.outputs.version_name }}" \
+            -PVERSION_CODE="${{ steps.version.outputs.version_code }}" \
+            --no-configuration-cache \
+            --no-daemon \
+            --stacktrace
+
+          DEBUG_APK="app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -s "$DEBUG_APK" ]; then
+            echo "::error::Debug APK missing or empty at $DEBUG_APK"
+            exit 1
+          fi
+
+          OUT_DIR="${{ runner.temp }}/release-assets"
+          mkdir -p "$OUT_DIR"
+          cp "$DEBUG_APK" "${OUT_DIR}/Maya-v${{ steps.version.outputs.version_name }}-debug.apk"
+          (cd "$OUT_DIR" && sha256sum "Maya-v${{ steps.version.outputs.version_name }}-debug.apk" > "Maya-v${{ steps.version.outputs.version_name }}-debug.apk.sha256")
+
+      - name: Upload Debug APK artifact when signing secrets are unconfigured
+        if: steps.secrets_check.outputs.configured != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Maya-Debug-APK
+          path: ${{ runner.temp }}/release-assets/Maya-v*-debug.apk*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Report missing release signing configuration
+        if: steps.secrets_check.outputs.configured != 'true'
+        run: |
+          cat <<EOF >> "$GITHUB_STEP_SUMMARY"
+          ## Maya AI — Debug APK Built (Release Signing Not Configured)
+
+          - **Debug APK**: Built and uploaded as workflow artifact \`Maya-Debug-APK\` (\`Maya-v${{ steps.version.outputs.version_name }}-debug.apk\`).
+          - **Release APK / GitHub Release**: **Skipped** — unsigned APKs are never published as releases.
+          - **Missing GitHub Secrets**: \`${{ steps.secrets_check.outputs.missing }}\`
+
+          ### Action Required to Enable Signed GitHub Releases
+          Add the following secrets in **Repository Settings → Secrets and variables → Actions**:
+          1. \`ANDROID_KEYSTORE_BASE64\`
+          2. \`ANDROID_KEYSTORE_PASSWORD\`
+          3. \`ANDROID_KEY_ALIAS\`
+          4. \`ANDROID_KEY_PASSWORD\`
+          EOF
+
+      - name: Decode & validate temporary release keystore
+        if: steps.secrets_check.outputs.configured == 'true'
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          KEYSTORE_FILE="${{ runner.temp }}/release-keystore.jks"
+          printf '%s' "$KEYSTORE_B64" | tr -d '[:space:]' | base64 --decode > "$KEYSTORE_FILE"
+          chmod 600 "$KEYSTORE_FILE"
+
+          if [ ! -s "$KEYSTORE_FILE" ]; then
+            echo "::error::Decoded keystore file is empty. Verify ANDROID_KEYSTORE_BASE64 secret."
+            exit 1
+          fi
+
+          if ! keytool -list -keystore "$KEYSTORE_FILE" -storepass "$STORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" >/dev/null 2>&1; then
+            echo "::error::Failed to verify keystore alias or store password using keytool. Check ANDROID_KEYSTORE_PASSWORD and ANDROID_KEY_ALIAS."
+            exit 1
+          fi
+
+          cat <<'EOF' > "${{ runner.temp }}/release-signing.init.gradle"
+          allprojects { proj ->
+            proj.afterEvaluate {
+              def androidExt = proj.extensions.findByName("android")
+              def releaseCfg = androidExt?.signingConfigs?.findByName("release")
+              def envAlias = System.getenv("ANDROID_KEY_ALIAS")
+              if (releaseCfg != null && envAlias != null && !envAlias.trim().isEmpty()) {
+                releaseCfg.keyAlias = envAlias.trim()
+              }
+            }
+          }
+          EOF
+
+      - name: Build signed Release APK & AAB
+        if: steps.secrets_check.outputs.configured == 'true'
+        env:
+          KEYSTORE_PATH: ${{ runner.temp }}/release-keystore.jks
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          ./gradlew assembleRelease bundleRelease \
+            --init-script "${{ runner.temp }}/release-signing.init.gradle" \
+            -PVERSION_NAME="${{ steps.version.outputs.version_name }}" \
+            -PVERSION_CODE="${{ steps.version.outputs.version_code }}" \
+            --no-configuration-cache \
+            --no-daemon \
+            --stacktrace
+
+      - name: Verify Release APK signature, metadata & generate checksums
+        if: steps.secrets_check.outputs.configured == 'true'
+        id: verify_release
+        run: |
+          RELEASE_APK="app/build/outputs/apk/release/app-release.apk"
+          RELEASE_AAB="app/build/outputs/bundle/release/app-release.aab"
+
+          if [ ! -s "$RELEASE_APK" ]; then
+            echo "::error::Signed Release APK missing or empty at $RELEASE_APK"
+            exit 1
+          fi
+          if [ ! -s "$RELEASE_AAB" ]; then
+            echo "::error::Release AAB missing or empty at $RELEASE_AAB"
+            exit 1
+          fi
+
+          APKSIGNER_BIN=$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools" -name apksigner -type f 2>/dev/null | sort -V | tail -n1 || true)
+          if [ -z "$APKSIGNER_BIN" ]; then
+            echo "::error::apksigner not found under Android SDK build-tools."
+            exit 1
+          fi
+          "$APKSIGNER_BIN" verify --verbose --print-certs "$RELEASE_APK"
+
+          AAPT2_BIN=$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools" -name aapt2 -type f 2>/dev/null | sort -V | tail -n1 || true)
+          if [ -n "$AAPT2_BIN" ]; then
+            "$AAPT2_BIN" dump badging "$RELEASE_APK" | head -n 3
+          fi
+
+          VERSION_NAME="${{ steps.version.outputs.version_name }}"
+          OUT_DIR="${{ runner.temp }}/release-assets"
+          mkdir -p "$OUT_DIR"
+
+          REL_APK_NAME="Maya-v${VERSION_NAME}-release.apk"
+          REL_AAB_NAME="Maya-v${VERSION_NAME}-release.aab"
+          DBG_APK_NAME="Maya-v${VERSION_NAME}-debug.apk"
+
+          cp "$RELEASE_APK" "${OUT_DIR}/${REL_APK_NAME}"
+          cp "$RELEASE_AAB" "${OUT_DIR}/${REL_AAB_NAME}"
+
+          (
+            cd "$OUT_DIR"
+            sha256sum "${REL_APK_NAME}" > "${REL_APK_NAME}.sha256"
+            sha256sum "${REL_AAB_NAME}" > "${REL_AAB_NAME}.sha256"
+          )
+
+          REL_APK_SHA=$(cut -d' ' -f1 "${OUT_DIR}/${REL_APK_NAME}.sha256")
+          DBG_APK_SHA=$(cut -d' ' -f1 "${OUT_DIR}/${DBG_APK_NAME}.sha256")
+          REL_AAB_SHA=$(cut -d' ' -f1 "${OUT_DIR}/${REL_AAB_NAME}.sha256")
+          REL_APK_SIZE=$(du -h "${OUT_DIR}/${REL_APK_NAME}" | cut -f1)
+          DBG_APK_SIZE=$(du -h "${OUT_DIR}/${DBG_APK_NAME}" | cut -f1)
+          REL_AAB_SIZE=$(du -h "${OUT_DIR}/${REL_AAB_NAME}" | cut -f1)
+
+          echo "rel_apk_name=${REL_APK_NAME}" >> "$GITHUB_OUTPUT"
+          echo "dbg_apk_name=${DBG_APK_NAME}" >> "$GITHUB_OUTPUT"
+          echo "rel_aab_name=${REL_AAB_NAME}" >> "$GITHUB_OUTPUT"
+          echo "rel_apk_sha=${REL_APK_SHA}" >> "$GITHUB_OUTPUT"
+          echo "dbg_apk_sha=${DBG_APK_SHA}" >> "$GITHUB_OUTPUT"
+          echo "rel_aab_sha=${REL_AAB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "rel_apk_size=${REL_APK_SIZE}" >> "$GITHUB_OUTPUT"
+          echo "dbg_apk_size=${DBG_APK_SIZE}" >> "$GITHUB_OUTPUT"
+          echo "rel_aab_size=${REL_AAB_SIZE}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        if: steps.secrets_check.outputs.configured == 'true'
+        run: |
+          VERSION_NAME="${{ steps.version.outputs.version_name }}"
+          VERSION_CODE="${{ steps.version.outputs.version_code }}"
+          RELEASE_TAG="${{ steps.version.outputs.release_tag }}"
+          BUILD_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          BASE_DL="https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}"
+
+          PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${RELEASE_TAG}$" | head -n1 || true)
+          if [ -n "$PREV_TAG" ]; then
+            CHANGES=$(git log "${PREV_TAG}..HEAD" --pretty=format:"- %s (%h)" -n 25 || true)
+          else
+            CHANGES=$(git log --pretty=format:"- %s (%h)" -n 15 || true)
+          fi
+          if [ -z "$CHANGES" ]; then
+            CHANGES="- Release build for ${RELEASE_TAG}"
+          fi
+
+          cat <<EOF > "${{ runner.temp }}/release-notes.md"
+          # Maya AI ${RELEASE_TAG}
+
+          | Field | Value |
+          |---|---|
+          | **Application Name** | Maya AI |
+          | **Package / Application ID** | \`com.aistudio.mayaai.kx7vqm\` |
+          | **Version Name** | \`${VERSION_NAME}\` |
+          | **Version Code** | \`${VERSION_CODE}\` |
+          | **Build Date** | ${BUILD_DATE} |
+          | **Build & Signing Status** | Unit Tests Passed · Release APK Verified Signed (APK v2) |
+
+          ## Direct Downloads
+
+          - **Signed Release APK (${{ steps.verify_release.outputs.rel_apk_size }})**: [${{ steps.verify_release.outputs.rel_apk_name }}](${BASE_DL}/${{ steps.verify_release.outputs.rel_apk_name }})
+          - **Debug APK (${{ steps.verify_release.outputs.dbg_apk_size }})**: [${{ steps.verify_release.outputs.dbg_apk_name }}](${BASE_DL}/${{ steps.verify_release.outputs.dbg_apk_name }})
+          - **Play Store App Bundle (${{ steps.verify_release.outputs.rel_aab_size }})**: [${{ steps.verify_release.outputs.rel_aab_name }}](${BASE_DL}/${{ steps.verify_release.outputs.rel_aab_name }})
+
+          ## SHA-256 Checksums
+
+          - \`${{ steps.verify_release.outputs.rel_apk_name }}\`: \`${{ steps.verify_release.outputs.rel_apk_sha }}\`
+          - \`${{ steps.verify_release.outputs.dbg_apk_name }}\`: \`${{ steps.verify_release.outputs.dbg_apk_sha }}\`
+          - \`${{ steps.verify_release.outputs.rel_aab_name }}\`: \`${{ steps.verify_release.outputs.rel_aab_sha }}\`
+
+          ## Important Changes
+
+          ${CHANGES}
+
+          ## Installation Instructions
+
+          1. Download **\`${{ steps.verify_release.outputs.rel_apk_name }}\`** on your Android device (Android 7.0 / API 24 or higher).
+          2. Optional: verify the SHA-256 digest against \`${{ steps.verify_release.outputs.rel_apk_name }}.sha256\`.
+          3. Open the downloaded APK and allow **Install unknown apps** if prompted.
+          4. Note: Do not install the debug APK over the signed release APK (they use different signing certificates).
+          EOF
+
+      - name: Clean up temporary keystore & init script
+        if: always()
+        run: |
+          rm -f "${{ runner.temp }}/release-keystore.jks" "${{ runner.temp }}/release-signing.init.gradle"
+
+      - name: Publish GitHub Release with APK & AAB assets
+        if: steps.secrets_check.outputs.configured == 'true'
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.version.outputs.release_tag }}
+          name: Maya AI ${{ steps.version.outputs.release_tag }}
+          body_path: ${{ runner.temp }}/release-notes.md
+          draft: false
+          prerelease: false
+          files: |
+            ${{ runner.temp }}/release-assets/*
+
+      - name: Write GitHub Release summary
+        if: steps.secrets_check.outputs.configured == 'true'
+        run: |
+          RELEASE_TAG="${{ steps.version.outputs.release_tag }}"
+          REL_APK="${{ steps.verify_release.outputs.rel_apk_name }}"
+          cat <<EOF >> "$GITHUB_STEP_SUMMARY"
+          ## Maya AI Release Published: ${RELEASE_TAG}
+
+          - **Release Page**: https://github.com/${{ github.repository }}/releases/tag/${RELEASE_TAG}
+          - **Direct Release APK**: https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/${REL_APK}
+          - **Direct Debug APK**: https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/${{ steps.verify_release.outputs.dbg_apk_name }}
+          EOF
+
+      - name: Upload Gradle failure reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Release-Failure-Reports
+          path: |
+            app/build/reports/
+            app/build/outputs/logs/
+          if-no-files-found: ignore
+          retention-days: 7

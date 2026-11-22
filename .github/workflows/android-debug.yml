@@ -1,0 +1,134 @@
+name: Android Debug CI
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-debug-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-debug:
+    name: Build & Test Debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK & accept licenses
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle & dependency cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare debug keystore & Gradle wrapper
+        run: |
+          chmod +x gradlew
+          if [ ! -f debug.keystore ] && [ -f debug.keystore.base64 ]; then
+            base64 --decode debug.keystore.base64 > debug.keystore
+            echo "Decoded debug.keystore from debug.keystore.base64"
+          fi
+          if [ ! -f debug.keystore ]; then
+            echo "::error::debug.keystore is missing and debug.keystore.base64 could not be decoded."
+            exit 1
+          fi
+
+      - name: Extract app version metadata
+        id: meta
+        run: |
+          APP_ID=$(grep -E 'applicationId\s*=' app/build.gradle.kts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+          VERSION_NAME=$(grep -E 'versionName\s*=' app/build.gradle.kts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/' || true)
+          if [ -z "$VERSION_NAME" ] || [[ "$VERSION_NAME" == *"ciVersionName"* ]]; then
+            VERSION_NAME="1.0"
+          fi
+          VERSION_CODE="1"
+          echo "app_id=${APP_ID:-com.aistudio.mayaai.kx7vqm}" >> "$GITHUB_OUTPUT"
+          echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Build Debug APK
+        run: ./gradlew clean assembleDebug --no-daemon --stacktrace
+
+      - name: Verify & package Debug APK artifact
+        id: verify
+        run: |
+          APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
+          if [ ! -s "$APK_PATH" ]; then
+            echo "::error::Expected Debug APK not found or empty at $APK_PATH"
+            exit 1
+          fi
+
+          OUT_DIR="${{ runner.temp }}/debug-artifact"
+          mkdir -p "$OUT_DIR"
+
+          VERSION_NAME="${{ steps.meta.outputs.version_name }}"
+          VERSION_CODE="${{ steps.meta.outputs.version_code }}"
+
+          AAPT2_BIN=$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools" -name aapt2 -type f 2>/dev/null | sort -V | tail -n1 || true)
+          if [ -n "$AAPT2_BIN" ]; then
+            BADGING=$("$AAPT2_BIN" dump badging "$APK_PATH" | head -n 3)
+            echo "$BADGING"
+            PARSED_VER=$(echo "$BADGING" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
+            PARSED_CODE=$(echo "$BADGING" | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p")
+            if [ -n "$PARSED_VER" ]; then VERSION_NAME="$PARSED_VER"; fi
+            if [ -n "$PARSED_CODE" ]; then VERSION_CODE="$PARSED_CODE"; fi
+          fi
+
+          DEST_APK="${OUT_DIR}/Maya-v${VERSION_NAME}-debug.apk"
+          cp "$APK_PATH" "$DEST_APK"
+          (cd "$OUT_DIR" && sha256sum "Maya-v${VERSION_NAME}-debug.apk" > "Maya-v${VERSION_NAME}-debug.apk.sha256")
+
+          APK_SIZE=$(du -h "$DEST_APK" | cut -f1)
+          cat <<EOF > "${OUT_DIR}/build-info.txt"
+          Application Name: Maya AI
+          Application ID: ${{ steps.meta.outputs.app_id }}
+          Version Name: ${VERSION_NAME}
+          Version Code: ${VERSION_CODE}
+          Build Type: debug
+          APK Filename: Maya-v${VERSION_NAME}-debug.apk
+          APK Size: ${APK_SIZE}
+          Git Ref: ${{ github.ref }}
+          Commit SHA: ${{ github.sha }}
+          Build Date (UTC): $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          EOF
+
+          cat "${OUT_DIR}/build-info.txt"
+
+      - name: Upload Maya-Debug-APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Maya-Debug-APK
+          path: ${{ runner.temp }}/debug-artifact/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Gradle failure reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Debug-Failure-Reports
+          path: |
+            app/build/reports/
+            app/build/outputs/logs/
+          if-no-files-found: ignore
+          retention-days: 7
