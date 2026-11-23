@@ -107,7 +107,7 @@ jobs:
           echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
           echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
           echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
-          echo "Resolved release version: ${VERSION_NAME} (versionCode=${VERSION_CODE}, tag=${RELEASE_TAG})"
+          echo "Resolved version: ${VERSION_NAME} (versionCode=${VERSION_CODE}, tag=${RELEASE_TAG})"
 
       - name: Check release signing secrets availability
         id: secrets_check
@@ -127,7 +127,7 @@ jobs:
             MISSING_LIST=$(IFS=", "; echo "${MISSING[*]}")
             echo "configured=false" >> "$GITHUB_OUTPUT"
             echo "missing=${MISSING_LIST}" >> "$GITHUB_OUTPUT"
-            echo "::warning::Release signing secrets are not configured (${MISSING_LIST}). Will build Debug APK only and skip Release publication."
+            echo "::warning::Release signing secrets are not configured (${MISSING_LIST}). Building installable Debug APK only; unsigned APK will NOT be published as a signed release."
 
             if [ "${{ github.ref_type }}" = "tag" ]; then
               echo "::error::Tag push '${{ github.ref_name }}' requires signed Release APK, but missing secrets: ${MISSING_LIST}. Configure them under Settings -> Secrets and variables -> Actions."
@@ -141,7 +141,8 @@ jobs:
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
 
-      - name: Build Debug APK (always verified)
+      - name: Build & verify installable Debug APK
+        id: build_debug
         run: |
           ./gradlew clean assembleDebug \
             -PVERSION_NAME="${{ steps.version.outputs.version_name }}" \
@@ -156,17 +157,24 @@ jobs:
             exit 1
           fi
 
+          APKSIGNER_BIN=$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools" -name apksigner -type f 2>/dev/null | sort -V | tail -n1 || true)
+          if [ -n "$APKSIGNER_BIN" ]; then
+            "$APKSIGNER_BIN" verify "$DEBUG_APK"
+          fi
+
           OUT_DIR="${{ runner.temp }}/release-assets"
           mkdir -p "$OUT_DIR"
-          cp "$DEBUG_APK" "${OUT_DIR}/Maya-v${{ steps.version.outputs.version_name }}-debug.apk"
-          (cd "$OUT_DIR" && sha256sum "Maya-v${{ steps.version.outputs.version_name }}-debug.apk" > "Maya-v${{ steps.version.outputs.version_name }}-debug.apk.sha256")
+          cp "$DEBUG_APK" "${OUT_DIR}/Maya-debug.apk"
+          (cd "$OUT_DIR" && sha256sum "Maya-debug.apk" > "Maya-SHA256SUMS.txt")
+          echo "dbg_size=$(du -h "${OUT_DIR}/Maya-debug.apk" | cut -f1)" >> "$GITHUB_OUTPUT"
+          echo "dbg_sha=$(cut -d' ' -f1 "${OUT_DIR}/Maya-SHA256SUMS.txt")" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Debug APK artifact when signing secrets are unconfigured
+      - name: Upload Maya-Debug-APK artifact when signing secrets are unconfigured
         if: steps.secrets_check.outputs.configured != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: Maya-Debug-APK
-          path: ${{ runner.temp }}/release-assets/Maya-v*-debug.apk*
+          path: ${{ runner.temp }}/release-assets/*
           if-no-files-found: error
           retention-days: 30
 
@@ -176,12 +184,12 @@ jobs:
           cat <<EOF >> "$GITHUB_STEP_SUMMARY"
           ## Maya AI — Debug APK Built (Release Signing Not Configured)
 
-          - **Debug APK**: Built and uploaded as workflow artifact \`Maya-Debug-APK\` (\`Maya-v${{ steps.version.outputs.version_name }}-debug.apk\`).
-          - **Release APK / GitHub Release**: **Skipped** — unsigned APKs are never published as releases.
+          - **Installable Debug APK**: \`Maya-debug.apk\` (${{ steps.build_debug.outputs.dbg_size }}) uploaded as GitHub Actions artifact \`Maya-Debug-APK\`.
+          - **Release APK / GitHub Release**: **Not published** — unsigned APKs are never published as signed releases.
           - **Missing GitHub Secrets**: \`${{ steps.secrets_check.outputs.missing }}\`
 
-          ### Action Required to Enable Signed GitHub Releases
-          Add the following secrets in **Repository Settings → Secrets and variables → Actions**:
+          ### Action Required for Signed Release APK & GitHub Release
+          Add these secrets under **Repository Settings → Secrets and variables → Actions**:
           1. \`ANDROID_KEYSTORE_BASE64\`
           2. \`ANDROID_KEYSTORE_PASSWORD\`
           3. \`ANDROID_KEY_ALIAS\`
@@ -266,39 +274,44 @@ jobs:
             "$AAPT2_BIN" dump badging "$RELEASE_APK" | head -n 3
           fi
 
-          VERSION_NAME="${{ steps.version.outputs.version_name }}"
           OUT_DIR="${{ runner.temp }}/release-assets"
           mkdir -p "$OUT_DIR"
 
-          REL_APK_NAME="Maya-v${VERSION_NAME}-release.apk"
-          REL_AAB_NAME="Maya-v${VERSION_NAME}-release.aab"
-          DBG_APK_NAME="Maya-v${VERSION_NAME}-debug.apk"
-
-          cp "$RELEASE_APK" "${OUT_DIR}/${REL_APK_NAME}"
-          cp "$RELEASE_AAB" "${OUT_DIR}/${REL_AAB_NAME}"
+          cp "$RELEASE_APK" "${OUT_DIR}/Maya-release.apk"
+          cp "$RELEASE_AAB" "${OUT_DIR}/Maya.aab"
 
           (
             cd "$OUT_DIR"
-            sha256sum "${REL_APK_NAME}" > "${REL_APK_NAME}.sha256"
-            sha256sum "${REL_AAB_NAME}" > "${REL_AAB_NAME}.sha256"
+            sha256sum "Maya-release.apk" "Maya-debug.apk" "Maya.aab" > "Maya-SHA256SUMS.txt"
           )
 
-          REL_APK_SHA=$(cut -d' ' -f1 "${OUT_DIR}/${REL_APK_NAME}.sha256")
-          DBG_APK_SHA=$(cut -d' ' -f1 "${OUT_DIR}/${DBG_APK_NAME}.sha256")
-          REL_AAB_SHA=$(cut -d' ' -f1 "${OUT_DIR}/${REL_AAB_NAME}.sha256")
-          REL_APK_SIZE=$(du -h "${OUT_DIR}/${REL_APK_NAME}" | cut -f1)
-          DBG_APK_SIZE=$(du -h "${OUT_DIR}/${DBG_APK_NAME}" | cut -f1)
-          REL_AAB_SIZE=$(du -h "${OUT_DIR}/${REL_AAB_NAME}" | cut -f1)
+          REL_APK_SHA=$(grep 'Maya-release.apk' "${OUT_DIR}/Maya-SHA256SUMS.txt" | awk '{print $1}')
+          DBG_APK_SHA=$(grep 'Maya-debug.apk' "${OUT_DIR}/Maya-SHA256SUMS.txt" | awk '{print $1}')
+          REL_AAB_SHA=$(grep 'Maya.aab' "${OUT_DIR}/Maya-SHA256SUMS.txt" | awk '{print $1}')
+          REL_APK_SIZE=$(du -h "${OUT_DIR}/Maya-release.apk" | cut -f1)
+          DBG_APK_SIZE=$(du -h "${OUT_DIR}/Maya-debug.apk" | cut -f1)
+          REL_AAB_SIZE=$(du -h "${OUT_DIR}/Maya.aab" | cut -f1)
 
-          echo "rel_apk_name=${REL_APK_NAME}" >> "$GITHUB_OUTPUT"
-          echo "dbg_apk_name=${DBG_APK_NAME}" >> "$GITHUB_OUTPUT"
-          echo "rel_aab_name=${REL_AAB_NAME}" >> "$GITHUB_OUTPUT"
           echo "rel_apk_sha=${REL_APK_SHA}" >> "$GITHUB_OUTPUT"
           echo "dbg_apk_sha=${DBG_APK_SHA}" >> "$GITHUB_OUTPUT"
           echo "rel_aab_sha=${REL_AAB_SHA}" >> "$GITHUB_OUTPUT"
           echo "rel_apk_size=${REL_APK_SIZE}" >> "$GITHUB_OUTPUT"
           echo "dbg_apk_size=${DBG_APK_SIZE}" >> "$GITHUB_OUTPUT"
           echo "rel_aab_size=${REL_AAB_SIZE}" >> "$GITHUB_OUTPUT"
+
+      - name: Clean up temporary keystore & init script
+        if: always()
+        run: |
+          rm -f "${{ runner.temp }}/release-keystore.jks" "${{ runner.temp }}/release-signing.init.gradle"
+
+      - name: Upload Maya-APKs GitHub Actions artifact
+        if: steps.secrets_check.outputs.configured == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Maya-APKs
+          path: ${{ runner.temp }}/release-assets/*
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Generate release notes
         if: steps.secrets_check.outputs.configured == 'true'
@@ -329,19 +342,20 @@ jobs:
           | **Version Name** | \`${VERSION_NAME}\` |
           | **Version Code** | \`${VERSION_CODE}\` |
           | **Build Date** | ${BUILD_DATE} |
-          | **Build & Signing Status** | Unit Tests Passed · Release APK Verified Signed (APK v2) |
+          | **Build & Signing Status** | Unit Tests Passed · Release APK Signed & Verified (`apksigner` v2) |
 
           ## Direct Downloads
 
-          - **Signed Release APK (${{ steps.verify_release.outputs.rel_apk_size }})**: [${{ steps.verify_release.outputs.rel_apk_name }}](${BASE_DL}/${{ steps.verify_release.outputs.rel_apk_name }})
-          - **Debug APK (${{ steps.verify_release.outputs.dbg_apk_size }})**: [${{ steps.verify_release.outputs.dbg_apk_name }}](${BASE_DL}/${{ steps.verify_release.outputs.dbg_apk_name }})
-          - **Play Store App Bundle (${{ steps.verify_release.outputs.rel_aab_size }})**: [${{ steps.verify_release.outputs.rel_aab_name }}](${BASE_DL}/${{ steps.verify_release.outputs.rel_aab_name }})
+          - **Signed Release APK (${{ steps.verify_release.outputs.rel_apk_size }})**: [Maya-release.apk](${BASE_DL}/Maya-release.apk)
+          - **Debug APK (${{ steps.verify_release.outputs.dbg_apk_size }})**: [Maya-debug.apk](${BASE_DL}/Maya-debug.apk)
+          - **Play Store App Bundle (${{ steps.verify_release.outputs.rel_aab_size }})**: [Maya.aab](${BASE_DL}/Maya.aab)
+          - **SHA-256 Checksums**: [Maya-SHA256SUMS.txt](${BASE_DL}/Maya-SHA256SUMS.txt)
 
           ## SHA-256 Checksums
 
-          - \`${{ steps.verify_release.outputs.rel_apk_name }}\`: \`${{ steps.verify_release.outputs.rel_apk_sha }}\`
-          - \`${{ steps.verify_release.outputs.dbg_apk_name }}\`: \`${{ steps.verify_release.outputs.dbg_apk_sha }}\`
-          - \`${{ steps.verify_release.outputs.rel_aab_name }}\`: \`${{ steps.verify_release.outputs.rel_aab_sha }}\`
+          - \`Maya-release.apk\`: \`${{ steps.verify_release.outputs.rel_apk_sha }}\`
+          - \`Maya-debug.apk\`: \`${{ steps.verify_release.outputs.dbg_apk_sha }}\`
+          - \`Maya.aab\`: \`${{ steps.verify_release.outputs.rel_aab_sha }}\`
 
           ## Important Changes
 
@@ -349,18 +363,13 @@ jobs:
 
           ## Installation Instructions
 
-          1. Download **\`${{ steps.verify_release.outputs.rel_apk_name }}\`** on your Android device (Android 7.0 / API 24 or higher).
-          2. Optional: verify the SHA-256 digest against \`${{ steps.verify_release.outputs.rel_apk_name }}.sha256\`.
+          1. Download **\`Maya-release.apk\`** on your Android device (Android 7.0 / API 24 or higher).
+          2. Optional: verify the SHA-256 checksum against \`Maya-SHA256SUMS.txt\`.
           3. Open the downloaded APK and allow **Install unknown apps** if prompted.
-          4. Note: Do not install the debug APK over the signed release APK (they use different signing certificates).
+          4. Do not install \`Maya-debug.apk\` over \`Maya-release.apk\` (they use different signing keys).
           EOF
 
-      - name: Clean up temporary keystore & init script
-        if: always()
-        run: |
-          rm -f "${{ runner.temp }}/release-keystore.jks" "${{ runner.temp }}/release-signing.init.gradle"
-
-      - name: Publish GitHub Release with APK & AAB assets
+      - name: Publish GitHub Release with APK, AAB & SHA-256 assets
         if: steps.secrets_check.outputs.configured == 'true'
         uses: softprops/action-gh-release@v2
         env:
@@ -378,13 +387,13 @@ jobs:
         if: steps.secrets_check.outputs.configured == 'true'
         run: |
           RELEASE_TAG="${{ steps.version.outputs.release_tag }}"
-          REL_APK="${{ steps.verify_release.outputs.rel_apk_name }}"
           cat <<EOF >> "$GITHUB_STEP_SUMMARY"
           ## Maya AI Release Published: ${RELEASE_TAG}
 
           - **Release Page**: https://github.com/${{ github.repository }}/releases/tag/${RELEASE_TAG}
-          - **Direct Release APK**: https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/${REL_APK}
-          - **Direct Debug APK**: https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/${{ steps.verify_release.outputs.dbg_apk_name }}
+          - **Direct Release APK**: https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/Maya-release.apk
+          - **Direct Debug APK**: https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/Maya-debug.apk
+          - **Direct AAB**: https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/Maya.aab
           EOF
 
       - name: Upload Gradle failure reports on failure

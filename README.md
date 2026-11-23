@@ -17,7 +17,7 @@ Automated Android Debug and Signed Release APK/AAB build pipelines for **Maya AI
 | Workflow | File | Triggers | Outputs |
 |---|---|---|---|
 | **Android Debug CI** | `.github/workflows/android-debug.yml` | `push`, `pull_request`, `workflow_dispatch` | Runs unit tests + `./gradlew clean assembleDebug --no-daemon`; uploads `Maya-Debug-APK` artifact |
-| **Android Release & GitHub Release** | `.github/workflows/android-release.yml` | `push` to `main`, `push` tags `v*`, `workflow_dispatch` | Runs tests, builds signed `Maya-v<ver>-release.apk`, `Maya-v<ver>-release.aab`, `Maya-v<ver>-debug.apk`, `.sha256` checksums, and publishes GitHub Release |
+| **Android Release & GitHub Release** | `.github/workflows/android-release.yml` | `push` to `main`, `push` tags `v*`, `workflow_dispatch` | Runs tests, builds signed `Maya-release.apk`, `Maya-debug.apk`, `Maya.aab`, `Maya-SHA256SUMS.txt`, uploads `Maya-APKs` artifact, and publishes GitHub Release |
 
 > **Security Behavior when Signing Secrets Are Missing**:
 > - Unsigned APKs are **never** published as signed releases.
@@ -88,6 +88,6 @@ git push origin v1.0.0
 
 Or run **Actions → Android Release & GitHub Release Automation → Run workflow** (or push to `main`).
 
-Once complete, download the signed APK (`Maya-v1.0.0-release.apk`), Debug APK, AAB bundle, and `.sha256` checksums from:
+Once complete, download the signed APK (`Maya-release.apk`), Debug APK (`Maya-debug.apk`), AAB bundle (`Maya.aab`), and `Maya-SHA256SUMS.txt` from:
 
 **GitHub Repository → Releases → Latest Release → Assets**
